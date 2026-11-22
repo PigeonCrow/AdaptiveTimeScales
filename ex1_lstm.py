@@ -1,0 +1,179 @@
+import os
+
+import matplotlib.pyplot as plt
+
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+
+
+DATA = "data/data_trial_preprocessed.csv"
+OUT = "lstm_outputs"
+N_TRIALS = 240
+FIT_END = 120          # train on trials 2 to 120, test on trials 121 to 240
+HIDDEN = 32
+LEARNING_RATE = 0.01
+EPOCHS = 500
+SEED = 0               # fixes the random starting weights
+
+
+# outcome and response: one row per session, one column per trial.
+# The response on a trial is the person's prediction, given before the outcome of that trial is shown.
+
+def load_data():
+
+    table = pd.read_csv(DATA, usecols=["ID", "session", "trials", "outcome", "response"])
+
+    # subject 3, session 2 looks the same as session 3, apart from confidence values???
+    is_copy = (table["ID"] == 3) & (table["session"] == 2)       # exclude session 2 
+    
+    trials = table[~is_copy].sort_values(["ID", "session", "trials"])
+    sessions = trials[["ID", "session"]].drop_duplicates().reset_index(drop=True)
+    
+    outcome = trials["outcome"].to_numpy().reshape(len(sessions), N_TRIALS)
+
+    response = trials["response"].to_numpy().reshape(len(sessions), N_TRIALS)
+
+    return sessions, outcome, response
+
+
+# input is the trial outcome 
+# target is the persons response on trial t + 1
+def to_tensors(outcome, response):
+
+    inputs = torch.tensor(outcome[:, :-1] / 100, dtype=torch.float32).unsqueeze(-1)
+
+    targets = torch.tensor(np.nan_to_num(response[:, 1:]) / 100, dtype=torch.float32)
+
+    answered = torch.tensor(~np.isnan(response[:, 1:]))
+
+    return inputs, targets, answered
+
+
+
+# network
+class LSTMNetwork(nn.Module):
+
+    def __init__(self):
+        
+        super().__init__()
+        
+        self.lstm = nn.LSTM(input_size=1, hidden_size=HIDDEN, batch_first=True)
+        self.output = nn.Linear(HIDDEN, 1)
+
+
+    def forward(self, inputs):
+
+        hidden, _ = self.lstm(inputs)
+
+
+        return self.output(hidden).squeeze(-1)
+
+
+
+
+# training  
+# weights, on the responses for trials 2 to FIT_END
+def train(network, inputs, targets, answered):
+
+    train_inputs = inputs[:, :FIT_END - 1]
+    train_targets = targets[:, :FIT_END - 1]
+    train_answered = answered[:, :FIT_END - 1]
+
+    optimizer = torch.optim.Adam(network.parameters(), lr=LEARNING_RATE)
+
+    for epoch in range(1, EPOCHS + 1):
+
+        prediction = network(train_inputs)
+
+        error = (prediction - train_targets)[train_answered]
+        loss = (error ** 2).mean()
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        if epoch % 50 == 0:
+            
+            points = 100 * loss.item() ** 0.5
+            print("epoch {}: error on the training trials {:.2f} points".format(epoch, points))
+
+
+# predictions for every session
+def predict(network, inputs):
+    with torch.no_grad():
+        return 100 * network(inputs).numpy()
+
+
+def print_errors(prediction, outcome, response):
+
+    error = prediction - response[:, 1:] 
+    baseline = outcome[:, :-1] - response[:, 1:]   # for comparison: "response = the last outcome"
+
+    fit_error = np.sqrt(np.nanmean(error[:, :FIT_END - 1] ** 2))
+    test_error = np.sqrt(np.nanmean(error[:, FIT_END - 1:] ** 2))
+    baseline_error = np.sqrt(np.nanmean(baseline[:, FIT_END - 1:] ** 2))
+
+    print(f"error on fit trials  (2 to {FIT_END}): {fit_error:.2f} points")
+    print(f"error on test trials ({FIT_END + 1} to {N_TRIALS}): {test_error:.2f} points")
+    print(f"error on test trials, last outcome as prediction: {baseline_error:.2f} points")
+
+
+# one row per trial (trials 2 to 240)
+def save_predictions(sessions, prediction, path):
+
+    table = pd.DataFrame({"ID": np.repeat(sessions["ID"].to_numpy(), N_TRIALS - 1),
+        "session": np.repeat(sessions["session"].to_numpy(), N_TRIALS - 1),
+                          "trials": np.tile(np.arange(2, N_TRIALS + 1), len(sessions)),
+                          "prediction": prediction.ravel()})
+    table.to_csv(path, index=False)
+
+
+# one session: outcomes, the person's responses and the model's predictions
+def plot_session(sessions, outcome, response, prediction, row, path):
+
+    trials = np.arange(1, N_TRIALS + 1)
+
+    plt.figure(figsize=(11, 4))
+
+    plt.axvspan(FIT_END + 0.5, N_TRIALS + 0.5, color="whitesmoke", label="test trials")
+    plt.scatter(trials, outcome[row], s=10, color="gray", label="outcome")
+    plt.plot(trials, response[row], color="royalblue", label="person")
+    plt.plot(trials[1:], prediction[row], color="red", label="LSTM")
+
+    plt.xlabel("trial")
+    plt.ylabel("value (0 to 100)")
+    plt.title(f"subject {sessions['ID'][row]:g}, session {sessions['session'][row]:g}")
+    plt.legend(frameon=False, ncol=4, loc="upper center", bbox_to_anchor=(0.5, -0.15))
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+
+if __name__ == "__main__":
+
+    os.makedirs(OUT, exist_ok=True)
+
+    # load data
+    sessions, outcome, response = load_data()
+    inputs, targets, answered = to_tensors(outcome, response)
+
+    print(f"{len(sessions)} sessions of {N_TRIALS} trials from {sessions['ID'].nunique()} people")
+
+    # build the network
+    torch.manual_seed(SEED)
+    network = LSTMNetwork()
+
+    # train
+    train(network, inputs, targets, answered)
+
+    # predict and score
+    prediction = predict(network, inputs)
+
+    print_errors(prediction, outcome, response)
+
+    # save and plot
+    torch.save(network.state_dict(), f"{OUT}/lstm_weights.pt")
+
+    save_predictions(sessions, prediction, f"{OUT}/lstm_predictions.csv")
+    plot_session(sessions, outcome, response, prediction, row=0, path=f"{OUT}/lstm_session.png")
