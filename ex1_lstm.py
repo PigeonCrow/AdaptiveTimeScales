@@ -9,26 +9,40 @@ import torch.nn as nn
 
 
 DATA = "data/data_trial_preprocessed.csv"
-OUT = "lstm_outputs"
+
+
+
 N_TRIALS = 240
-FIT_END = 120          # train on trials 2 to 120, test on trials 121 to 240
-HIDDEN = 32
+FIT_END = 120         
+
+#HIDDENL = 8 
+#HIDDENL = 16 
+#HIDDENL = 32 
+HIDDENL = 64 
+
+OUT = f"lstm_out_{HIDDENL}"
+#OUT = "lstm_out_16"
+#OUT = "lstm_out_32"
+#OUT = "lstm_out_64"
+
+
 LEARNING_RATE = 0.01
 EPOCHS = 500
-SEED = 0               # fixes the random starting weights
+SEED = 0              
 
 
 # outcome and response: one row per session, one column per trial.
-# The response on a trial is the person's prediction, given before the outcome of that trial is shown.
+# The response on a trial is subjects prediction, 
+# given before the outcome of that trial is shown.
+
+
 
 def load_data():
 
     table = pd.read_csv(DATA, usecols=["ID", "session", "trials", "outcome", "response"])
 
-    # subject 3, session 2 looks the same as session 3, apart from confidence values???
-    is_copy = (table["ID"] == 3) & (table["session"] == 2)       # exclude session 2 
     
-    trials = table[~is_copy].sort_values(["ID", "session", "trials"])
+    trials = table.sort_values(["ID", "session", "trials"])
     sessions = trials[["ID", "session"]].drop_duplicates().reset_index(drop=True)
     
     outcome = trials["outcome"].to_numpy().reshape(len(sessions), N_TRIALS)
@@ -36,6 +50,7 @@ def load_data():
     response = trials["response"].to_numpy().reshape(len(sessions), N_TRIALS)
 
     return sessions, outcome, response
+
 
 
 # input is the trial outcome 
@@ -59,8 +74,8 @@ class LSTMNetwork(nn.Module):
         
         super().__init__()
         
-        self.lstm = nn.LSTM(input_size=1, hidden_size=HIDDEN, batch_first=True)
-        self.output = nn.Linear(HIDDEN, 1)
+        self.lstm = nn.LSTM(input_size=1, hidden_size=HIDDENL, batch_first=True)
+        self.output = nn.Linear(HIDDENL, 1)
 
 
     def forward(self, inputs):
@@ -109,7 +124,7 @@ def predict(network, inputs):
 def print_errors(prediction, outcome, response):
 
     error = prediction - response[:, 1:] 
-    baseline = outcome[:, :-1] - response[:, 1:]   # for comparison: "response = the last outcome"
+    baseline = outcome[:, :-1] - response[:, 1:]   # response = the last outcome
 
     fit_error = np.sqrt(np.nanmean(error[:, :FIT_END - 1] ** 2))
     test_error = np.sqrt(np.nanmean(error[:, FIT_END - 1:] ** 2))
@@ -130,7 +145,7 @@ def save_predictions(sessions, prediction, path):
     table.to_csv(path, index=False)
 
 
-# one session: outcomes, the person's responses and the model's predictions
+# one session: outcomes, subjects responses and the models predictions
 def plot_session(sessions, outcome, response, prediction, row, path):
 
     trials = np.arange(1, N_TRIALS + 1)
@@ -139,12 +154,12 @@ def plot_session(sessions, outcome, response, prediction, row, path):
 
     plt.axvspan(FIT_END + 0.5, N_TRIALS + 0.5, color="whitesmoke", label="test trials")
     plt.scatter(trials, outcome[row], s=10, color="gray", label="outcome")
-    plt.plot(trials, response[row], color="royalblue", label="person")
+    plt.plot(trials, response[row], color="royalblue", label="human")
     plt.plot(trials[1:], prediction[row], color="red", label="LSTM")
 
     plt.xlabel("trial")
     plt.ylabel("value (0 to 100)")
-    plt.title(f"subject {sessions['ID'][row]:g}, session {sessions['session'][row]:g}")
+    plt.title(f"subject {sessions["ID"][row]:g}, session {sessions["session"][row]:g}")
     plt.legend(frameon=False, ncol=4, loc="upper center", bbox_to_anchor=(0.5, -0.15))
     plt.savefig(path, dpi=150, bbox_inches="tight")
     plt.close()
@@ -158,9 +173,9 @@ if __name__ == "__main__":
     sessions, outcome, response = load_data()
     inputs, targets, answered = to_tensors(outcome, response)
 
-    print(f"{len(sessions)} sessions of {N_TRIALS} trials from {sessions['ID'].nunique()} people")
+    print(f"{len(sessions)} sessions of {N_TRIALS} trials from {sessions["ID"].nunique()} people")
 
-    # build the network
+    # network
     torch.manual_seed(SEED)
     network = LSTMNetwork()
 
@@ -173,7 +188,7 @@ if __name__ == "__main__":
     print_errors(prediction, outcome, response)
 
     # save and plot
-    torch.save(network.state_dict(), f"{OUT}/lstm_weights.pt")
+    torch.save(network.state_dict(), f"{OUT}/lstm_weights_{HIDDENL}.pt")
 
     save_predictions(sessions, prediction, f"{OUT}/lstm_predictions.csv")
     plot_session(sessions, outcome, response, prediction, row=0, path=f"{OUT}/lstm_session.png")
